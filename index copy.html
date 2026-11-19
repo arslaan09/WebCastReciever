@@ -1,0 +1,1320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TV Cast Receiver</title>
+  <!--
+    Custom CAF receiver for Universal TV Remote (app ID 0A01ABD5).
+    Handles:
+      • WebRTC screen mirroring (signaling over urn:x-cast:com.bdcast.webrtc)
+      • Standard media casting (photos / videos / audio via cast-media-player)
+      • Friendly on-screen states + automatic shutdown when the session ends,
+        so the receiver never lingers on the TV after the user is done.
+    Deploy this file to the URL registered for the receiver app ID.
+  -->
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 100%; height: 100%;
+      background: #03050c;
+      overflow: hidden;
+      font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── WebRTC mirror video ── */
+    #video {
+      position: fixed;
+      inset: 0;
+      width: 100%; height: 100%;
+      object-fit: contain;
+      background: #000;
+      opacity: 0;
+      transition: opacity 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+      z-index: 3; /* WebRTC Mirroring above standard player */
+    }
+    #video.visible { opacity: 1; }
+
+    /* ── Standard Cast Media Player ── */
+    cast-media-player {
+      position: fixed;
+      inset: 0;
+      width: 100%; height: 100%;
+      z-index: 1; /* Keep base player active so CAF binds and plays successfully */
+      background: #000;
+      --object-fit: contain;
+    }
+    cast-media-player::part(video),
+    cast-media-player video,
+    #video {
+      object-fit: contain !important;
+      max-width: 100vw !important;
+      max-height: 100vh !important;
+    }
+
+    /* ── Ambient Background Glows ── */
+    .ambient-bg {
+      position: fixed;
+      inset: 0;
+      overflow: hidden;
+      z-index: 2; /* Cover the player during idle state */
+      background: #060913;
+    }
+    .glow-blob {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(120px);
+      opacity: 0.15;
+      mix-blend-mode: screen;
+      animation: float 20s infinite alternate ease-in-out;
+    }
+    .blob1 {
+      top: -10%; left: -10%;
+      width: 50vw; height: 50vw;
+      background: radial-gradient(circle, #6307f5 0%, transparent 70%);
+    }
+    .blob2 {
+      bottom: -10%; right: -10%;
+      width: 60vw; height: 60vw;
+      background: radial-gradient(circle, #07f582 0%, transparent 70%);
+      animation-delay: -5s;
+    }
+    @keyframes float {
+      0%   { transform: translate(0, 0) scale(1); }
+      100% { transform: translate(8%, 5%) scale(1.15); }
+    }
+
+    /* ── Modern Status Card Overlay ── */
+    #overlay {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 5;
+      transition: opacity 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+      pointer-events: none;
+    }
+    #overlay.hidden { opacity: 0; }
+
+    .glass-card {
+      background: rgba(10, 15, 30, 0.45);
+      backdrop-filter: blur(30px);
+      -webkit-backdrop-filter: blur(30px);
+      border: 1px solid rgba(255, 255, 255, 0.07);
+      padding: 48px 64px;
+      border-radius: 28px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 28px;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.4),
+                  inset 0 1px 1px rgba(255, 255, 255, 0.1);
+      max-width: 90%;
+      width: 560px;
+      text-align: center;
+    }
+
+    /* ── Logo Ring with Glowing Indicators ── */
+    .logo-ring {
+      width: 100px; height: 100px;
+      border-radius: 50%;
+      border: 3px solid rgba(255, 255, 255, 0.08);
+      display: flex; align-items: center; justify-content: center;
+      position: relative;
+      background: rgba(255, 255, 255, 0.02);
+      transition: all 0.5s ease;
+    }
+    .logo-ring svg {
+      width: 44px; height: 44px;
+      stroke: rgba(255, 255, 255, 0.7);
+      transition: all 0.5s ease;
+    }
+
+    .logo-ring::before {
+      content: "";
+      position: absolute;
+      inset: -5px;
+      border-radius: 50%;
+      border: 3px solid transparent;
+      border-top-color: #6307f5;
+      animation: spin 1.8s linear infinite;
+      box-shadow: 0 0 15px rgba(99, 7, 245, 0.2);
+      transition: all 0.5s ease;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .logo-ring.connected {
+      border-color: rgba(7, 245, 130, 0.2);
+      background: rgba(7, 245, 130, 0.05);
+      box-shadow: 0 0 35px rgba(7, 245, 130, 0.25);
+    }
+    .logo-ring.connected svg {
+      stroke: #07f582;
+      filter: drop-shadow(0 0 8px rgba(7, 245, 130, 0.5));
+    }
+    .logo-ring.connected::before {
+      border-top-color: #07f582;
+      animation: pulse-ring 2s infinite ease-in-out;
+      box-shadow: 0 0 25px rgba(7, 245, 130, 0.3);
+    }
+    @keyframes pulse-ring {
+      0%, 100% { transform: scale(1); opacity: 0.8; }
+      50%      { transform: scale(1.04); opacity: 1; }
+    }
+
+    /* Ended state: calm, no spinner */
+    .logo-ring.ended::before { animation: none; border-top-color: transparent; box-shadow: none; }
+    .logo-ring.ended {
+      border-color: rgba(255, 255, 255, 0.15);
+      background: rgba(255, 255, 255, 0.04);
+    }
+    .logo-ring.ended svg { stroke: rgba(255, 255, 255, 0.85); }
+
+    /* ── Typography ── */
+    #status-title {
+      font-size: 26px;
+      font-weight: 600;
+      color: #ffffff;
+      letter-spacing: -0.5px;
+      margin-bottom: 6px;
+    }
+    #status-sub {
+      font-size: 15px;
+      font-weight: 400;
+      color: rgba(255, 255, 255, 0.5);
+      line-height: 1.5;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    /* ── Audio Playback Overlay ──────────────────────────────────── */
+    #audio-overlay {
+      position: fixed;
+      inset: 0;
+      background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+      display: none;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      z-index: 8;
+      color: white;
+    }
+
+    .audio-disc-container {
+      position: relative;
+      width: 280px;
+      height: 280px;
+      margin-bottom: 50px;
+    }
+
+    /* Outer glow ring */
+    .audio-disc-glow {
+      position: absolute;
+      top: -20px;
+      left: -20px;
+      width: 320px;
+      height: 320px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(102, 126, 234, 0.3) 0%, transparent 70%);
+      animation: glow-pulse 3s ease-in-out infinite;
+    }
+
+    @keyframes glow-pulse {
+      0%, 100% { transform: scale(1); opacity: 0.6; }
+      50% { transform: scale(1.15); opacity: 1; }
+    }
+
+    /* Vinyl disc */
+    .audio-disc {
+      position: relative;
+      width: 280px;
+      height: 280px;
+      border-radius: 50%;
+      background: 
+        radial-gradient(circle at center, #1a1a2e 15%, transparent 16%),
+        radial-gradient(circle at center, transparent 30%, rgba(255,255,255,0.03) 31%, transparent 32%),
+        radial-gradient(circle at center, transparent 45%, rgba(255,255,255,0.03) 46%, transparent 47%),
+        radial-gradient(circle at center, transparent 60%, rgba(255,255,255,0.03) 61%, transparent 62%),
+        radial-gradient(circle at center, transparent 75%, rgba(255,255,255,0.03) 76%, transparent 77%),
+        linear-gradient(135deg, #2d2d44 0%, #1a1a2e 100%);
+      box-shadow: 0 0 60px rgba(102, 126, 234, 0.2),
+                  inset 0 0 30px rgba(0, 0, 0, 0.5);
+      animation: spin-disc 8s linear infinite;
+    }
+
+    .audio-disc.paused {
+      animation-play-state: paused;
+    }
+
+    @keyframes spin-disc {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+
+    /* Center label on disc */
+    .audio-disc-center {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 90px;
+      height: 90px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      box-shadow: 0 4px 20px rgba(102, 126, 234, 0.4);
+    }
+
+    .audio-disc-center svg {
+      width: 40px;
+      height: 40px;
+      fill: white;
+    }
+
+    /* Track info */
+    .audio-track-info {
+      text-align: center;
+      margin-bottom: 40px;
+    }
+
+    .audio-now-playing {
+      font-size: 18px;
+      text-transform: uppercase;
+      letter-spacing: 4px;
+      color: rgba(255, 255, 255, 0.5);
+      margin-bottom: 12px;
+    }
+
+    .audio-track-title {
+      font-size: 28px;
+      font-weight: 600;
+      color: white;
+      max-width: 600px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* Equalizer bars */
+    .audio-equalizer {
+      display: flex;
+      align-items: flex-end;
+      gap: 6px;
+      height: 50px;
+    }
+
+    .eq-bar {
+      width: 8px;
+      background: linear-gradient(to top, #667eea, #764ba2);
+      border-radius: 4px;
+      animation: eq-bounce 1.2s ease-in-out infinite;
+    }
+
+    .eq-bar.paused {
+      animation-play-state: paused;
+      height: 8px !important;
+    }
+
+    .eq-bar:nth-child(1) { animation-delay: 0s; }
+    .eq-bar:nth-child(2) { animation-delay: 0.15s; }
+    .eq-bar:nth-child(3) { animation-delay: 0.3s; }
+    .eq-bar:nth-child(4) { animation-delay: 0.45s; }
+    .eq-bar:nth-child(5) { animation-delay: 0.6s; }
+    .eq-bar:nth-child(6) { animation-delay: 0.75s; }
+    .eq-bar:nth-child(7) { animation-delay: 0.9s; }
+    .eq-bar:nth-child(8) { animation-delay: 0.2s; }
+    .eq-bar:nth-child(9) { animation-delay: 0.5s; }
+
+    @keyframes eq-bounce {
+      0%, 100% { height: 8px; }
+      25% { height: 35px; }
+      50% { height: 18px; }
+      75% { height: 45px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Ambient Glowing Blobs -->
+  <div class="ambient-bg">
+    <div class="glow-blob blob1"></div>
+    <div class="glow-blob blob2"></div>
+  </div>
+
+  <!-- Mirror video stays PERMANENTLY muted (autoplay-safe). Mirroring sound
+       plays through the dedicated #audio-sink element below, fed by the
+       WebRTC audio track — the two stay in sync because they share one
+       peer connection (RTCP lip-sync). -->
+  <video id="video" autoplay playsinline muted></video>
+  <audio id="audio-sink" autoplay></audio>
+
+  <!-- Standard Cast Media Player -->
+  <cast-media-player></cast-media-player>
+
+  <!-- Image container for photo casting -->
+  <img id="image-player" style="position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; z-index: 9; display: none;" />
+
+  <!-- Full-screen connected background image -->
+  <img id="connected-bg-img" src="TV-Connected.png" style="position: fixed; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 4; display: none;" />
+
+  <!-- Custom Media Player for video/audio casting -->
+  <video id="media-player" class="hidden" playsinline preload="auto"
+    style="position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; z-index: 7; background: black; display: none;"></video>
+
+  <!-- Audio Playback Overlay -->
+  <div id="audio-overlay">
+    <div class="audio-disc-container">
+      <div class="audio-disc-glow"></div>
+      <div class="audio-disc" id="audioDisc">
+        <div class="audio-disc-center">
+          <svg viewBox="0 0 24 24">
+            <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55C7.79 13 6 14.79 6 17s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/>
+          </svg>
+        </div>
+      </div>
+    </div>
+    <div class="audio-track-info">
+      <div class="audio-now-playing">Now Playing</div>
+      <div class="audio-track-title" id="audioTrackTitle">Music</div>
+    </div>
+    <div class="audio-equalizer" id="audioEqualizer">
+      <div class="eq-bar"></div>
+      <div class="eq-bar"></div>
+      <div class="eq-bar"></div>
+      <div class="eq-bar"></div>
+      <div class="eq-bar"></div>
+      <div class="eq-bar"></div>
+      <div class="eq-bar"></div>
+      <div class="eq-bar"></div>
+      <div class="eq-bar"></div>
+    </div>
+  </div>
+
+
+
+  <div id="overlay">
+    <div class="glass-card">
+      <div class="logo-ring" id="logo-ring">
+        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.5"
+             stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="3" width="20" height="14" rx="2"/>
+          <path d="M8 21h8M12 17v4"/>
+          <path d="M2 10h20"/>
+        </svg>
+      </div>
+      <div>
+        <div id="status-title">Ready to Connect</div>
+        <div id="status-sub">Open the app on your iPhone and tap “Tap to connect” to get started</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Google Cast Web Receiver SDK (CAF v3) -->
+  <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+
+  <script>
+    'use strict';
+
+
+
+    // ── DOM refs ──────────────────────────────────────────────────────────
+    const video       = document.getElementById('video');
+    const audioSink   = document.getElementById('audio-sink');
+    const overlay     = document.getElementById('overlay');
+    const logoRing    = document.getElementById('logo-ring');
+    const statusTitle = document.getElementById('status-title');
+    const statusSub   = document.getElementById('status-sub');
+    const connectedBg = document.getElementById('connected-bg-img');
+
+    // ── State ─────────────────────────────────────────────────────────────
+    const NS = 'urn:x-cast:com.bdcast.webrtc';
+    let pc                = null;
+    let senderId          = null;
+    let remoteDescSet     = false;
+    let pendingCandidates = [];
+    let shutdownTimer     = null;
+
+    // Custom media elements and state
+    const mediaPlayer     = document.getElementById('media-player');
+    const audioOverlay     = document.getElementById('audio-overlay');
+    const audioDisc        = document.getElementById('audioDisc');
+    const audioTrackTitle  = document.getElementById('audioTrackTitle');
+    const audioEqualizer  = document.getElementById('audioEqualizer');
+
+    let mediaStopping = false;
+    let isAudioMode = false;
+    // Volume requested by the phone (0–1). Applied to whichever element is
+    // playing — the WebRTC mirror video and/or the custom media player.
+    let requestedVolume = 1;
+    let audioStateInterval = null;
+
+    // Diagnostic ping to the phone: how many audio tracks arrived, whether
+    // the audio sink is actually playing, and inbound audio QUALITY counters
+    // (packet loss / concealment) so choppy sound can be attributed to the
+    // network vs the pipeline. Logged on the iOS side.
+    let lastAudioPlayError = '';
+    async function reportAudioState() {
+      try {
+        if (!pc || !senderId) return;
+        const audioTracks = pc.getReceivers
+          ? pc.getReceivers().filter(r => r.track && r.track.kind === 'audio').length
+          : -1;
+
+        // Inbound audio RTP quality (best effort — older receivers may lack fields)
+        let lost = -1, concealed = -1, received = -1, jbDelay = -1;
+        try {
+          const stats = await pc.getStats();
+          stats.forEach(s => {
+            if (s.type === 'inbound-rtp' && (s.kind === 'audio' || s.mediaType === 'audio')) {
+              lost      = s.packetsLost ?? -1;
+              received  = s.packetsReceived ?? -1;
+              concealed = s.concealedSamples ?? -1;
+              jbDelay   = (s.jitterBufferDelay && s.jitterBufferEmittedCount)
+                ? Math.round(1000 * s.jitterBufferDelay / s.jitterBufferEmittedCount)
+                : -1;
+            }
+          });
+        } catch (_) {}
+
+        context.sendCustomMessage(NS, senderId, {
+          type: 'AUDIO_STATE',
+          rv: 7, // receiver revision — lets the phone verify the deployed version
+          audioTracks: audioTracks,
+          muted: audioSink.muted,
+          volume: audioSink.volume,
+          paused: audioSink.paused,
+          playError: lastAudioPlayError || 'none',
+          pktsReceived: received,
+          pktsLost: lost,
+          concealedSamples: concealed,
+          jitterBufferMs: jbDelay
+        });
+      } catch (e) { /* diagnostics only */ }
+    }
+
+    // Starts (or restarts) audio-sink playback and records any rejection so
+    // the phone can see WHY the TV is silent. Chromecast normally allows
+    // autoplay with sound, but retry on failure just in case.
+    function playAudioSink() {
+      if (!audioSink.srcObject) return;
+      audioSink.muted  = requestedVolume <= 0.001;
+      audioSink.volume = requestedVolume;
+      const p = audioSink.play();
+      if (p) p.then(() => {
+        lastAudioPlayError = '';
+      }).catch((e) => {
+        lastAudioPlayError = String(e && e.name ? e.name : e);
+        console.warn('[Receiver] audio play failed:', e);
+        setTimeout(playAudioSink, 1000); // keep retrying while a track exists
+      });
+    }
+
+    function startAudioStateReporting() {
+      if (audioStateInterval) return;
+      audioStateInterval = setInterval(reportAudioState, 5000);
+    }
+
+    function stopAudioStateReporting() {
+      if (audioStateInterval) { clearInterval(audioStateInterval); audioStateInterval = null; }
+    }
+    let mediaRetryCount = 0;
+    const MAX_MEDIA_RETRIES = 4;
+    let mediaRetryTimer = null;
+    let statusInterval = null;
+    let senderConnected = false;
+    let connectedDeviceName = '';
+
+    // ── UI helpers ────────────────────────────────────────────────────────
+    function applyUIVisibility() {
+      if (!connectedBg) return;
+
+      const playerState = playerManager ? playerManager.getPlayerState() : null;
+      const isMediaActive = (playerState === 'PLAYING' || playerState === 'PAUSED' || playerState === 'BUFFERING') 
+        || mediaLoadInProgress 
+        || isImageActive;
+
+      const isMirroringActive = !!(video.srcObject && video.classList.contains('visible'));
+      const isAudioActive = audioOverlay && audioOverlay.style.display === 'flex';
+
+      const showConnectedImage = senderConnected && !isMirroringActive && !isMediaActive && !isAudioActive;
+
+      if (showConnectedImage) {
+        connectedBg.style.display = 'block';
+        overlay.style.display = 'none';
+      } else {
+        connectedBg.style.display = 'none';
+        const shouldHideOverlay = isMirroringActive || isMediaActive || isAudioActive;
+        overlay.style.display = shouldHideOverlay ? 'none' : 'flex';
+      }
+    }
+
+    function setStatus(title, sub) {
+      statusTitle.textContent = title;
+      statusSub.textContent   = sub || '';
+      applyUIVisibility();
+    }
+
+    function showStream(on) {
+      video.classList.toggle('visible', on);
+      overlay.style.display = on ? 'none' : 'flex';
+      const ambient = document.querySelector('.ambient-bg');
+      if (ambient) ambient.style.display = on ? 'none' : 'block';
+      applyUIVisibility();
+    }
+
+    function setRingState(state) { // 'searching' | 'connected' | 'ended'
+      logoRing.classList.toggle('connected', state === 'connected');
+      logoRing.classList.toggle('ended', state === 'ended');
+    }
+
+    // Ensure stream always uses contain so full iPad/iPhone screen is visible without cropping or overflow.
+    function updateObjectFit() {
+      if (!video.videoWidth || !video.videoHeight) return;
+      if (video.style.objectFit !== 'contain') {
+        video.style.objectFit = 'contain';
+      }
+    }
+    video.addEventListener('resize', updateObjectFit);
+    setInterval(updateObjectFit, 300);
+
+    // ── Automatic shutdown ────────────────────────────────────────────────
+    // When the last phone is truly gone (no sender AND no live stream), wait
+    // a generous grace period before stopping the receiver — the phone app
+    // silently reconnects after transient drops (backgrounding, Wi-Fi blips)
+    // and a reconnect cancels the shutdown. Only after the grace period does
+    // the TV return to its home screen.
+    function scheduleShutdown() {
+      cancelShutdown();
+      setRingState('ended');
+      setStatus('Waiting for your iPhone…', 'Reconnecting automatically — or start mirroring again from the app');
+      shutdownTimer = setTimeout(() => {
+        try { context.stop(); } catch (e) { console.warn('[Receiver] stop failed:', e); }
+      }, 60000);
+    }
+
+    function cancelShutdown() {
+      if (shutdownTimer) { clearTimeout(shutdownTimer); shutdownTimer = null; }
+    }
+
+    // Shuts down only when BOTH the Cast senders and the WebRTC stream are
+    // gone — never while media might still resume.
+    function maybeShutdownIfAbandoned() {
+      const remaining = context.getSenders ? context.getSenders().length : 0;
+      if (remaining === 0 && !senderConnected) scheduleShutdown();
+    }
+
+    // ── Cast Receiver setup ───────────────────────────────────────────────
+    const context = cast.framework.CastReceiverContext.getInstance();
+    const playerManager = context.getPlayerManager();
+
+    // State flags to determine if standard media or custom image is active
+    let mediaLoadInProgress = false;
+    let isImageActive = false;
+
+    function updateUIForMediaState() {
+      try {
+        const player = document.querySelector('cast-media-player');
+        if (!player) return;
+
+        const playerState = playerManager ? playerManager.getPlayerState() : null;
+        
+        // Media is active if the player is currently playing, paused, buffering,
+        // or if we have a load request in progress or an image cast active.
+        const isMediaActive = (playerState === 'PLAYING' || playerState === 'PAUSED' || playerState === 'BUFFERING') 
+          || mediaLoadInProgress 
+          || isImageActive;
+
+        const isImage = isImageActive;
+
+        console.log('[Receiver] updateUI — state:', playerState,
+                    'isMediaActive:', isMediaActive,
+                    'isImage:', isImage,
+                    'loadInProgress:', mediaLoadInProgress);
+
+        if (isMediaActive) {
+          player.style.zIndex = '10'; // Bring player to the absolute front
+
+          // Show the media player, hide mirroring elements.
+          const imgPlayer = document.getElementById('image-player');
+          if (isImage) {
+            if (imgPlayer) {
+              imgPlayer.style.display = 'block';
+            }
+          } else {
+            if (imgPlayer) imgPlayer.style.display = 'none';
+          }
+          // We NEVER hide/show the 'cast-media-player' element itself with display: none.
+          // Instead we hide everything else on top of it.
+          video.classList.remove('visible');
+          video.style.display = 'none';
+          overlay.style.display = 'none';
+          const ambient = document.querySelector('.ambient-bg');
+          if (ambient) ambient.style.display = 'none';
+        } else {
+          player.style.zIndex = '1'; // Push player to the back layer
+
+          // Media finished or no media — clear the load flag.
+          mediaLoadInProgress = false;
+          isImageActive = false;
+
+          // Restore mirroring / idle elements.
+          const imgPlayer = document.getElementById('image-player');
+          if (imgPlayer) imgPlayer.style.display = 'none';
+          
+          const isMirroringActive = !!(video.srcObject);
+          video.style.display = 'block';
+          video.classList.toggle('visible', isMirroringActive);
+          overlay.style.display = isMirroringActive ? 'none' : 'flex';
+          const ambient = document.querySelector('.ambient-bg');
+          if (ambient) ambient.style.display = isMirroringActive ? 'none' : 'block';
+        }
+        applyUIVisibility();
+      } catch (err) {
+        console.error('[Receiver] updateUIForMediaState error:', err);
+      }
+    }
+
+    try {
+      playerManager.addEventListener(
+        cast.framework.events.EventType.PLAYER_STATE_CHANGED,
+        (event) => {
+          console.log('[Receiver] PLAYER_STATE_CHANGED:', event.state);
+          // Clear load flag once the player enters a real playback state
+          if (event.state === 'PLAYING' || event.state === 'PAUSED') {
+            mediaLoadInProgress = false;
+          }
+          updateUIForMediaState();
+        }
+      );
+      playerManager.addEventListener(
+        cast.framework.events.EventType.MEDIA_STATUS,
+        () => updateUIForMediaState()
+      );
+      // Listen for media finished to restore idle UI
+      playerManager.addEventListener(
+        cast.framework.events.EventType.MEDIA_FINISHED,
+        () => {
+          console.log('[Receiver] MEDIA_FINISHED');
+          mediaLoadInProgress = false;
+          updateUIForMediaState();
+        }
+      );
+      playerManager.setMessageInterceptor(
+        cast.framework.messages.MessageType.LOAD,
+        (loadRequestData) => {
+          console.log('[Receiver] LOAD interceptor — media request received:',
+                      loadRequestData && loadRequestData.media
+                        ? (loadRequestData.media.contentId || loadRequestData.media.contentUrl)
+                        : 'unknown');
+          // Set load flag IMMEDIATELY so updateUI shows the player
+          mediaLoadInProgress = true;
+          isImageActive = false;
+          cancelShutdown();
+
+          // Clean up any WebRTC mirroring session.
+          stopAudioStateReporting();
+          if (pc) { pc.close(); pc = null; }
+          remoteDescSet = false;
+          pendingCandidates = [];
+          video.srcObject = null;
+          audioSink.srcObject = null;
+          audioSink.pause();
+
+          // Hide overlay & mirroring elements immediately so the standard player is exposed.
+          const imgPlayer = document.getElementById('image-player');
+          if (imgPlayer) imgPlayer.style.display = 'none';
+          video.classList.remove('visible');
+          video.style.display = 'none';
+          overlay.style.display = 'none';
+          const ambient = document.querySelector('.ambient-bg');
+          if (ambient) ambient.style.display = 'none';
+          applyUIVisibility();
+
+          return loadRequestData;
+        }
+      );
+    } catch (e) {
+      console.warn('[Receiver] player listener setup failed:', e);
+    }
+
+    // ── Custom channel (WebRTC signaling) ─────────────────────────────────
+    context.addCustomMessageListener(NS, async (event) => {
+      senderId = event.senderId;
+
+      let msg;
+      try {
+        msg = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+      } catch (e) {
+        console.error('[Receiver] failed to parse message:', event.data, e);
+        return;
+      }
+
+      switch (msg.type) {
+        case 'offer': await handleOffer(msg.sdp); break;
+        case 'ice':   await handleICE(msg);       break;
+        case 'image': handleImage(msg.url);       break;
+        case 'stop':
+          cleanup('Connected', 'Ready when you are — start mirroring or cast media from your iPhone');
+          setRingState('connected');
+          break;
+        case 'CAST_VIDEO':
+          cleanup(null, null, true);
+          isAudioMode = false;
+          playMedia(msg.videoUrl, msg.autoplay !== false);
+          setStatus('Video Loading...');
+          break;
+        case 'CAST_AUDIO':
+          cleanup(null, null, true);
+          isAudioMode = true;
+          playMedia(msg.audioUrl, msg.autoplay !== false);
+          showAudioOverlay();
+          setStatus('Audio Loading...');
+          break;
+        case 'MEDIA_CONTROL':
+          handleMediaControl(msg.command, msg.value);
+          break;
+        case 'SET_VOLUME': {
+          const v = parseFloat(msg.volume);
+          if (!isNaN(v)) {
+            requestedVolume = Math.max(0, Math.min(1, v));
+            // Mirroring sound (dedicated audio element)
+            audioSink.volume = requestedVolume;
+            audioSink.muted  = requestedVolume <= 0.001;
+            // Custom media player (video/audio casting)
+            mediaPlayer.volume = requestedVolume;
+            if (requestedVolume > 0.001) mediaPlayer.muted = false;
+          }
+          break;
+        }
+        case 'STOP_CASTING':
+          console.log('[Receiver] STOP_CASTING received — returning to splash');
+          returnToSplash();
+          break;
+        default:
+          console.warn('[Receiver] unknown message type:', msg.type);
+      }
+    });
+
+    context.addEventListener(
+      cast.framework.system.EventType.SENDER_CONNECTED,
+      () => {
+        cancelShutdown();
+        senderConnected = true;
+        // Don't call cleanup() here — it would abort any in-flight media load.
+        // Just update the ring state and status text. If a media load arrives
+        // right after connection, the LOAD interceptor handles the UI switch.
+        setRingState('connected');
+        setStatus('Connected', 'Ready when you are — start mirroring or cast media from your iPhone');
+      }
+    );
+
+    context.addEventListener(
+      cast.framework.system.EventType.SENDER_DISCONNECTED,
+      () => {
+        senderConnected = false;
+        // Only consider shutdown when no sender remains (multi-sender safety).
+        const remaining = context.getSenders ? context.getSenders().length : 0;
+        if (remaining > 0) return;
+
+        // CRITICAL: a dropped Cast socket does NOT mean mirroring stopped.
+        // WebRTC media flows over its own direct connection and keeps playing
+        // while the phone app streams in the background and silently
+        // reconnects its Cast session. Never tear down a live stream here —
+        // the WebRTC state machine (oniceconnectionstatechange) cleans up if
+        // the media itself dies.
+        const streamLive = !!(pc && video.srcObject &&
+          ['new', 'checking', 'connected', 'completed'].includes(pc.iceConnectionState));
+        if (streamLive) {
+          console.log('[Receiver] sender disconnected but the mirror stream is live — keeping it on screen');
+          return;
+        }
+
+        cleanup(null, null);
+        scheduleShutdown();
+      }
+    );
+
+    context.start({
+      touchScreenOptimizedApp: false,
+      // Never let CAF kill the receiver just because it looks idle — screen
+      // mirroring plays through a plain <video>/<audio>, which CAF does not
+      // recognise as activity.
+      disableIdleTimeout: true,
+      // Ends the session automatically when the sender vanishes without a
+      // clean disconnect (phone died, Wi-Fi dropped) — 10 minutes of silence.
+      maxInactivity: 600
+    });
+
+    // ── Image handling ──────────────────────────────────────────────────────
+    function handleImage(imageUrl) {
+      console.log('[Receiver] Displaying image:', imageUrl);
+      cancelShutdown();
+      isImageActive = true;
+
+      // Clean up any WebRTC session
+      stopAudioStateReporting();
+      if (pc) { pc.close(); pc = null; }
+      remoteDescSet = false;
+      pendingCandidates = [];
+      video.srcObject = null;
+      audioSink.srcObject = null;
+      audioSink.pause();
+
+      // Stop media player if running
+      try {
+        if (playerManager) playerManager.stop();
+      } catch (e) {
+        console.warn('[Receiver] playerManager.stop() error:', e);
+      }
+
+      // Display the image
+      const imgPlayer = document.getElementById('image-player');
+      if (imgPlayer) {
+        imgPlayer.src = imageUrl;
+        imgPlayer.style.display = 'block';
+        imgPlayer.onload = () => {
+          console.log('[Receiver] Image loaded successfully');
+          if (senderId) {
+            context.sendCustomMessage(NS, senderId, { type: 'IMAGE_DISPLAYED' });
+          }
+        };
+        imgPlayer.onerror = () => {
+          console.error('[Receiver] Failed to load image:', imageUrl);
+        };
+      }
+
+      // Hide other elements
+      video.classList.remove('visible');
+      video.style.display = 'none';
+      overlay.style.display = 'none';
+      const ambient = document.querySelector('.ambient-bg');
+      if (ambient) ambient.style.display = 'none';
+
+      setStatus('Photo displayed', 'Viewing photo from your iPhone');
+      setRingState('connected');
+    }
+
+    // ── WebRTC ────────────────────────────────────────────────────────────
+    function buildPeerConnection() {
+      const conn = new RTCPeerConnection({
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302'  },
+          { urls: 'stun:stun1.l.google.com:19302' },
+        ]
+      });
+
+      conn.ontrack = (event) => {
+        // Zero playout delay ONLY for video (mirroring latency). Audio keeps
+        // WebRTC's adaptive jitter buffer — forcing 0 there strips the
+        // receiver's ability to absorb Wi-Fi jitter / wait for FEC, which
+        // turns every network hiccup into an audible glitch.
+        if (event.receiver && event.track && event.track.kind === 'video') {
+          event.receiver.playoutDelayHint = 0;
+        }
+
+        // AUDIO: plays through the dedicated #audio-sink element only.
+        // The mirror video element stays muted forever, so its autoplay can
+        // never be blocked and never swallows the sound.
+        if (event.track && event.track.kind === 'audio') {
+          console.log('[Receiver] audio track received — attaching to sink');
+          audioSink.srcObject = new MediaStream([event.track]);
+          playAudioSink();
+          reportAudioState();
+          startAudioStateReporting();
+          return;
+        }
+
+        // VIDEO
+        let stream = event.streams[0];
+        if (!stream && event.track) stream = new MediaStream([event.track]);
+        if (!stream) return;
+        if (video.srcObject !== stream) {
+          video.srcObject = stream;
+          video.muted = true; // sound comes from #audio-sink, never from here
+          video.play().catch(e => console.error('[Receiver] video play failed:', e));
+        }
+        showStream(true);
+        setStatus('Mirroring live');
+        reportAudioState();
+        startAudioStateReporting();
+      };
+
+      conn.onicecandidate = ({ candidate }) => {
+        if (!candidate || !senderId) return;
+        context.sendCustomMessage(NS, senderId, {
+          type:          'ice',
+          sdpMid:        candidate.sdpMid,
+          sdpMLineIndex: candidate.sdpMLineIndex,
+          candidate:     candidate.candidate,
+        });
+      };
+
+      conn.oniceconnectionstatechange = () => {
+        switch (conn.iceConnectionState) {
+          case 'connected':
+          case 'completed':
+            setStatus('Mirroring live', 'Receiving your iPhone screen');
+            // Kick the audio sink again now that the session is established —
+            // mirroring audio streams at full volume; the TV remote sets loudness.
+            if (audioSink.paused) playAudioSink();
+            reportAudioState();
+            break;
+          case 'disconnected':
+            setStatus('Reconnecting…', 'The connection is weak — hold on a moment');
+            break;
+          case 'failed':
+            setTimeout(() => {
+              if (conn && conn.iceConnectionState === 'failed') {
+                cleanup('Connection lost', 'Tap “Start Mirroring” on your iPhone to try again');
+                setRingState('connected');
+                maybeShutdownIfAbandoned();
+              }
+            }, 10000);
+            break;
+          case 'closed':
+            cleanup('Mirroring ended', 'Start mirroring again from your iPhone whenever you like');
+            setRingState('ended');
+            maybeShutdownIfAbandoned();
+            break;
+        }
+      };
+
+      return conn;
+    }
+
+    async function handleOffer(sdpStr) {
+      remoteDescSet     = false;
+      pendingCandidates = [];
+      cancelShutdown();
+      cleanup(null, null, true);
+      setStatus('Connecting…', 'Setting up the mirror stream');
+      setRingState('connected');
+
+      pc = buildPeerConnection();
+
+      try {
+        await pc.setRemoteDescription({ type: 'offer', sdp: sdpStr });
+        remoteDescSet = true;
+
+        for (const c of pendingCandidates) {
+          try { await pc.addIceCandidate(c); } catch (_) {}
+        }
+        pendingCandidates = [];
+
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+
+        context.sendCustomMessage(NS, senderId, {
+          type: 'answer',
+          sdp:  pc.localDescription.sdp,
+        });
+      } catch (err) {
+        console.error('[Receiver] offer handling error:', err);
+        cleanup('Connection failed', 'Please try again from your iPhone');
+        setRingState('connected');
+      }
+    }
+
+    async function handleICE(msg) {
+      const candidate = {
+        candidate:     msg.candidate,
+        sdpMid:        msg.sdpMid,
+        sdpMLineIndex: msg.sdpMLineIndex,
+      };
+
+      if (!pc || !remoteDescSet) {
+        pendingCandidates.push(candidate);
+        return;
+      }
+
+      try {
+        await pc.addIceCandidate(candidate);
+      } catch (e) {
+        console.warn('[Receiver] addIceCandidate error (benign):', e.message);
+      }
+    }
+
+    // ── Custom Media Player logic & callbacks ──────────────────────────────
+    function sendStatus(state) {
+      try {
+        const msg = {
+          type: 'MEDIA_STATUS',
+          state: state,
+          currentTime: mediaPlayer.currentTime || 0,
+          duration: (mediaPlayer.duration && isFinite(mediaPlayer.duration)) ? mediaPlayer.duration : 0
+        };
+        context.sendCustomMessage(NS, undefined, msg);
+      } catch (e) {
+        console.warn('[Receiver] failed to send status:', e);
+      }
+    }
+
+    function startStatusReporting() {
+      if (statusInterval) return;
+      statusInterval = setInterval(() => {
+        if (!mediaPlayer.paused && !mediaPlayer.ended) {
+          sendStatus('playing');
+        }
+      }, 1000);
+    }
+
+    function stopStatusReporting() {
+      if (statusInterval) {
+        clearInterval(statusInterval);
+        statusInterval = null;
+      }
+    }
+
+    // Custom media player event listeners
+    mediaPlayer.addEventListener('playing', () => {
+      sendStatus('playing');
+      startStatusReporting();
+      if (isAudioMode) {
+        audioDisc.classList.remove('paused');
+        setEqBarsPaused(false);
+      }
+    });
+
+    mediaPlayer.addEventListener('pause', () => {
+      if (!mediaStopping) {
+        stopStatusReporting();
+        sendStatus('paused');
+        if (isAudioMode) {
+          audioDisc.classList.add('paused');
+          setEqBarsPaused(true);
+        }
+      }
+    });
+
+    mediaPlayer.addEventListener('waiting', () => {
+      if (!mediaStopping) sendStatus('buffering');
+    });
+
+    mediaPlayer.addEventListener('ended', () => {
+      stopStatusReporting();
+      sendStatus('ended');
+      if (isAudioMode) {
+        audioDisc.classList.add('paused');
+        setEqBarsPaused(true);
+      }
+    });
+
+    mediaPlayer.addEventListener('error', () => {
+      if (mediaStopping) return;
+      stopStatusReporting();
+      sendStatus('idle');
+    });
+
+    mediaPlayer.addEventListener('loadeddata', () => {
+      console.log('[Receiver] media loadeddata — unmuting custom player');
+      mediaPlayer.volume = requestedVolume;
+      mediaPlayer.muted = requestedVolume <= 0.001;
+    });
+
+    mediaPlayer.addEventListener('seeked', () => {
+      sendStatus(mediaPlayer.paused ? 'paused' : 'playing');
+    });
+
+    function setEqBarsPaused(paused) {
+      const bars = audioEqualizer.querySelectorAll('.eq-bar');
+      for (let i = 0; i < bars.length; i++) {
+        if (paused) {
+          bars[i].classList.add('paused');
+        } else {
+          bars[i].classList.remove('paused');
+        }
+      }
+    }
+
+    function showAudioOverlay() {
+      audioOverlay.style.display = 'flex';
+      audioDisc.classList.remove('paused');
+      setEqBarsPaused(false);
+      audioTrackTitle.textContent = 'Audio';
+      applyUIVisibility();
+    }
+
+    function hideAudioOverlay() {
+      audioOverlay.style.display = 'none';
+      isAudioMode = false;
+      applyUIVisibility();
+    }
+
+    function playMedia(url, autoplay) {
+      console.log('[Receiver] playMedia called, url=' + url + ' autoplay=' + autoplay);
+      mediaRetryCount = 0;
+      attemptPlayMedia(url, autoplay);
+    }
+
+    function attemptPlayMedia(url, autoplay) {
+      console.log('[Receiver] attemptPlayMedia attempt=' + (mediaRetryCount + 1));
+      
+      // Hide mirroring and native components
+      video.style.display = 'none';
+      video.classList.remove('visible');
+      
+      // Stop native Cast media player if active
+      try {
+        if (playerManager) playerManager.stop();
+      } catch (e) {
+        console.warn('[Receiver] playerManager.stop() error:', e);
+      }
+
+      mediaPlayer.classList.remove('hidden');
+      mediaPlayer.style.display = 'block';
+
+      stopStatusReporting();
+      if (mediaRetryTimer) { clearTimeout(mediaRetryTimer); mediaRetryTimer = null; }
+
+      mediaPlayer.oncanplay = null;
+      mediaPlayer.onerror = null;
+
+      mediaPlayer.oncanplay = function () {
+        console.log('[Receiver] custom player ready');
+        mediaPlayer.oncanplay = null;
+        if (autoplay) {
+          const p = mediaPlayer.play();
+          if (p) p.catch(function (e) {
+            console.log('[Receiver] play() failed, trying muted:', e);
+            mediaPlayer.muted = true;
+            mediaPlayer.play().catch(function () { });
+          });
+        } else {
+          mediaPlayer.pause();
+          sendStatus('paused');
+        }
+      };
+
+      mediaPlayer.onerror = function () {
+        if (mediaStopping) return;
+        const err = mediaPlayer.error;
+        console.log('[Receiver] media error: code=' + (err ? err.code : '?') + ' msg=' + (err ? err.message : '?'));
+        mediaRetryCount++;
+        if (mediaRetryCount <= MAX_MEDIA_RETRIES) {
+          mediaRetryTimer = setTimeout(function () {
+            const sep = url.indexOf('?') >= 0 ? '&' : '?';
+            const retryUrl = url + sep + 'retry=' + mediaRetryCount;
+            mediaPlayer.src = retryUrl;
+            mediaPlayer.load();
+          }, mediaRetryCount * 1000);
+        } else {
+          console.log('[Receiver] custom play media failed, returning to splash');
+          returnToSplash();
+        }
+      };
+
+      mediaPlayer.src = url;
+      mediaPlayer.load();
+    }
+
+    function handleMediaControl(command, value) {
+      switch (command) {
+        case 'play':
+          mediaPlayer.play();
+          break;
+        case 'pause':
+          mediaPlayer.pause();
+          break;
+        case 'seek':
+        case 'seekTo':
+          mediaPlayer.currentTime = parseFloat(value) || 0;
+          setTimeout(() => sendStatus(mediaPlayer.paused ? 'paused' : 'playing'), 100);
+          break;
+      }
+    }
+
+    function stopMediaCasting() {
+      mediaStopping = true;
+      stopStatusReporting();
+      mediaPlayer.oncanplay = null;
+      mediaPlayer.onerror = null;
+      if (mediaRetryTimer) { clearTimeout(mediaRetryTimer); mediaRetryTimer = null; }
+      mediaRetryCount = 0;
+      mediaPlayer.pause();
+      mediaPlayer.removeAttribute('src');
+      mediaPlayer.load();
+      mediaPlayer.classList.add('hidden');
+      mediaPlayer.style.display = 'none';
+      setTimeout(() => { mediaStopping = false; }, 100);
+    }
+
+    function returnToSplash() {
+      stopMediaCasting();
+      hideAudioOverlay();
+      
+      // Reset image casting status & elements
+      isImageActive = false;
+      const imgPlayer = document.getElementById('image-player');
+      if (imgPlayer) {
+        imgPlayer.style.display = 'none';
+        imgPlayer.src = '';
+      }
+
+      video.style.display = 'block';
+      video.classList.remove('visible');
+      overlay.style.display = 'flex';
+      const ambient = document.querySelector('.ambient-bg');
+      if (ambient) ambient.style.display = 'block';
+
+      if (senderConnected && context.getSenders().length > 0) {
+        setRingState('connected');
+        setStatus('Connected', 'Ready when you are — start mirroring or cast media from your iPhone');
+      } else {
+        setRingState('searching');
+        setStatus('Ready to Connect', 'Open the app on your iPhone and tap “Tap to connect” to get started');
+      }
+    }
+
+    function cleanup(title, sub, keepOverlay = false) {
+      // Only stop media playback during a full cleanup (not during sender
+      // connect events where keepOverlay=true) to prevent aborting in-flight
+      // media load requests.
+      if (!keepOverlay) {
+        try {
+          if (playerManager) playerManager.stop();
+        } catch (e) {
+          console.warn('[Receiver] playerManager.stop() error:', e);
+        }
+        mediaLoadInProgress = false;
+        isImageActive = false;
+        
+        // Custom media cleanups
+        stopMediaCasting();
+        hideAudioOverlay();
+      }
+
+      stopAudioStateReporting();
+      if (pc) { pc.close(); pc = null; }
+      remoteDescSet     = false;
+      pendingCandidates = [];
+      video.srcObject   = null;
+      audioSink.srcObject = null;
+      audioSink.pause();
+
+      // Hide image player
+      const imgPlayer = document.getElementById('image-player');
+      if (imgPlayer) {
+        imgPlayer.style.display = 'none';
+        imgPlayer.src = '';
+      }
+
+      if (!keepOverlay) {
+        showStream(false);
+        setRingState('searching');
+      }
+      if (title !== null) setStatus(title, sub);
+      applyUIVisibility();
+    }
+  </script>
+</body>
+</html>
