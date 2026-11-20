@@ -3,30 +3,49 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>TV Cast Receiver</title>
+  <title>WebCast Receiver</title>
   <!--
-    Custom CAF receiver for Universal TV Remote (app ID 0A01ABD5).
-    Handles:
-      • WebRTC screen mirroring (signaling over urn:x-cast:com.bdcast.webrtc)
-      • Standard media casting (photos / videos / audio via cast-media-player)
-      • Friendly on-screen states + automatic shutdown when the session ends,
-        so the receiver never lingers on the TV after the user is done.
-    Deploy this file to the URL registered for the receiver app ID.
+    Custom CAF receiver for WebCast (app ID 87D369BF).
+
+    Deployed to the URL registered against the receiver app ID in the Google
+    Cast console; the TV loads it from there. It handles:
+      • Web and local video casting through the standard CAF player
+      • Photos, audio and YouTube (YouTube's own embedded player, by video ID)
+      • A connection screen and friendly states, with automatic shutdown when
+        the session ends so the receiver never lingers on the TV.
+    Keep `NS` below in step with CastingConfiguration.chromecastNamespace.
+
+    The script toggles inline display / z-index on these elements and the
+    classes .visible, .hidden, .connected, .ended and .paused — those names
+    and the element ids must not change.
   -->
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap');
+
+    :root {
+      --bg: #f2f5fc;
+      --card: #ffffff;
+      --ink: #0e1522;
+      --soft: rgba(14, 21, 34, 0.62);
+      --faint: rgba(14, 21, 34, 0.42);
+      --blue: #007aff;
+      --blue-deep: #0a56c9;
+      --blue-soft: #e5f0ff;
+      --line: rgba(14, 21, 34, 0.08);
+    }
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     html, body {
       width: 100%; height: 100%;
-      background: #03050c;
+      background: var(--bg);
       overflow: hidden;
-      font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: var(--ink);
       -webkit-font-smoothing: antialiased;
     }
 
-    /* ── WebRTC mirror video ── */
+    /* ── Mirror video (kept for the shared signaling path) ── */
     #video {
       position: fixed;
       inset: 0;
@@ -35,7 +54,7 @@
       background: #000;
       opacity: 0;
       transition: opacity 0.6s cubic-bezier(0.16, 1, 0.3, 1);
-      z-index: 3; /* WebRTC Mirroring above standard player */
+      z-index: 3;
     }
     #video.visible { opacity: 1; }
 
@@ -44,9 +63,12 @@
       position: fixed;
       inset: 0;
       width: 100%; height: 100%;
-      z-index: 1; /* Keep base player active so CAF binds and plays successfully */
+      z-index: 1;
       background: #000;
       --object-fit: contain;
+      --theme-hue: 211;
+      --progress-color: #007aff;
+      --font-family: 'Outfit', sans-serif;
     }
     cast-media-player::part(video),
     cast-media-player video,
@@ -56,39 +78,79 @@
       max-height: 100vh !important;
     }
 
-    /* ── Ambient Background Glows ── */
+    /* ── Ambient backdrop ── */
     .ambient-bg {
       position: fixed;
       inset: 0;
       overflow: hidden;
-      z-index: 2; /* Cover the player during idle state */
-      background: #060913;
+      z-index: 2;
+      background:
+        radial-gradient(90vw 70vw at 50% -20%, #ffffff 0%, transparent 70%),
+        linear-gradient(180deg, #f6f8fe 0%, #e9eff9 100%);
+    }
+    .ambient-bg::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background-image: radial-gradient(rgba(0, 122, 255, 0.10) 1.4px, transparent 1.5px);
+      background-size: 2.6vw 2.6vw;
+      -webkit-mask-image: radial-gradient(ellipse at center, #000 20%, transparent 75%);
+      mask-image: radial-gradient(ellipse at center, #000 20%, transparent 75%);
     }
     .glow-blob {
       position: absolute;
       border-radius: 50%;
-      filter: blur(120px);
-      opacity: 0.15;
-      mix-blend-mode: screen;
-      animation: float 20s infinite alternate ease-in-out;
+      filter: blur(80px);
+      animation: drift 22s infinite alternate ease-in-out;
     }
     .blob1 {
-      top: -10%; left: -10%;
-      width: 50vw; height: 50vw;
-      background: radial-gradient(circle, #6307f5 0%, transparent 70%);
+      top: -28%; left: -14%;
+      width: 58vw; height: 58vw;
+      background: radial-gradient(circle, rgba(0, 122, 255, 0.28) 0%, transparent 66%);
     }
     .blob2 {
-      bottom: -10%; right: -10%;
-      width: 60vw; height: 60vw;
-      background: radial-gradient(circle, #07f582 0%, transparent 70%);
-      animation-delay: -5s;
+      bottom: -34%; right: -18%;
+      width: 68vw; height: 68vw;
+      background: radial-gradient(circle, rgba(70, 150, 255, 0.30) 0%, transparent 66%);
+      animation-delay: -8s;
     }
-    @keyframes float {
+    @keyframes drift {
       0%   { transform: translate(0, 0) scale(1); }
-      100% { transform: translate(8%, 5%) scale(1.15); }
+      100% { transform: translate(6%, 4%) scale(1.12); }
     }
 
-    /* ── Modern Status Card Overlay ── */
+    /* ── Shared pieces ── */
+    .brand {
+      position: absolute;
+      top: 6vh; left: 6.2vw;
+      display: flex;
+      align-items: center;
+      gap: 1vw;
+      font-size: clamp(18px, 2vw, 64px);
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      color: var(--ink);
+    }
+    .brand-mark {
+      width: 2.7vw; height: 2.7vw;
+      min-width: 28px; min-height: 28px;
+      border-radius: 28%;
+      background: linear-gradient(145deg, #2b92ff, #0a62d6);
+      box-shadow: 0 0.5vw 1.4vw rgba(0, 122, 255, 0.35);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .brand-mark svg { width: 60%; height: 60%; }
+    .cast-icon { fill: none; stroke: #fff; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+
+    .hint {
+      position: absolute;
+      bottom: 6vh; left: 0; right: 0;
+      text-align: center;
+      font-size: clamp(13px, 1.45vw, 44px);
+      color: var(--faint);
+    }
+
+    /* ── Status overlay: ready / connecting / ended ── */
     #overlay {
       position: fixed;
       inset: 0;
@@ -103,228 +165,284 @@
     #overlay.hidden { opacity: 0; }
 
     .glass-card {
-      background: rgba(10, 15, 30, 0.45);
-      backdrop-filter: blur(30px);
-      -webkit-backdrop-filter: blur(30px);
-      border: 1px solid rgba(255, 255, 255, 0.07);
-      padding: 48px 64px;
-      border-radius: 28px;
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 28px;
-      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.4),
-                  inset 0 1px 1px rgba(255, 255, 255, 0.1);
-      max-width: 90%;
-      width: 560px;
+      gap: 3.4vh;
       text-align: center;
+      max-width: 70vw;
+      animation: rise 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(2vh); }
+      to   { opacity: 1; transform: none; }
     }
 
-    /* ── Logo Ring with Glowing Indicators ── */
     .logo-ring {
-      width: 100px; height: 100px;
-      border-radius: 50%;
-      border: 3px solid rgba(255, 255, 255, 0.08);
+      width: 10.5vw; height: 10.5vw;
+      min-width: 96px; min-height: 96px;
+      border-radius: 30%;
+      background: var(--card);
+      border: 1px solid var(--line);
       display: flex; align-items: center; justify-content: center;
       position: relative;
-      background: rgba(255, 255, 255, 0.02);
+      box-shadow: 0 1.6vw 4vw rgba(10, 60, 140, 0.16);
       transition: all 0.5s ease;
     }
     .logo-ring svg {
-      width: 44px; height: 44px;
-      stroke: rgba(255, 255, 255, 0.7);
+      width: 48%; height: 48%;
+      stroke: rgba(14, 21, 34, 0.55);
       transition: all 0.5s ease;
     }
-
     .logo-ring::before {
       content: "";
       position: absolute;
-      inset: -5px;
-      border-radius: 50%;
-      border: 3px solid transparent;
-      border-top-color: #6307f5;
-      animation: spin 1.8s linear infinite;
-      box-shadow: 0 0 15px rgba(99, 7, 245, 0.2);
+      inset: -1.1vw;
+      border-radius: 34%;
+      border: 0.24vw solid transparent;
+      border-top-color: var(--blue);
+      border-right-color: rgba(0, 122, 255, 0.3);
+      animation: spin 1.6s linear infinite;
       transition: all 0.5s ease;
+    }
+    .logo-ring::after {
+      content: "";
+      position: absolute;
+      inset: -4vw;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(0, 122, 255, 0.18) 0%, transparent 65%);
+      z-index: -1;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    .logo-ring.connected {
-      border-color: rgba(7, 245, 130, 0.2);
-      background: rgba(7, 245, 130, 0.05);
-      box-shadow: 0 0 35px rgba(7, 245, 130, 0.25);
-    }
-    .logo-ring.connected svg {
-      stroke: #07f582;
-      filter: drop-shadow(0 0 8px rgba(7, 245, 130, 0.5));
-    }
+    .logo-ring.connected { border-color: rgba(0, 122, 255, 0.5); }
+    .logo-ring.connected svg { stroke: var(--blue); }
     .logo-ring.connected::before {
-      border-top-color: #07f582;
-      animation: pulse-ring 2s infinite ease-in-out;
-      box-shadow: 0 0 25px rgba(7, 245, 130, 0.3);
+      border-color: rgba(0, 122, 255, 0.55);
+      animation: breathe 2.4s infinite ease-in-out;
     }
-    @keyframes pulse-ring {
-      0%, 100% { transform: scale(1); opacity: 0.8; }
-      50%      { transform: scale(1.04); opacity: 1; }
+    @keyframes breathe {
+      0%, 100% { transform: scale(1); opacity: 0.55; }
+      50%      { transform: scale(1.05); opacity: 1; }
     }
 
-    /* Ended state: calm, no spinner */
-    .logo-ring.ended::before { animation: none; border-top-color: transparent; box-shadow: none; }
-    .logo-ring.ended {
-      border-color: rgba(255, 255, 255, 0.15);
-      background: rgba(255, 255, 255, 0.04);
-    }
-    .logo-ring.ended svg { stroke: rgba(255, 255, 255, 0.85); }
+    .logo-ring.ended::before { animation: none; border-color: transparent; }
+    .logo-ring.ended::after { opacity: 0.35; }
+    .logo-ring.ended svg { stroke: rgba(14, 21, 34, 0.7); }
 
-    /* ── Typography ── */
     #status-title {
-      font-size: 26px;
-      font-weight: 600;
-      color: #ffffff;
-      letter-spacing: -0.5px;
-      margin-bottom: 6px;
+      font-size: clamp(28px, 4.4vw, 140px);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      color: var(--ink);
+      margin-bottom: 1.4vh;
     }
     #status-sub {
-      font-size: 15px;
+      font-size: clamp(15px, 1.75vw, 54px);
       font-weight: 400;
-      color: rgba(255, 255, 255, 0.5);
-      line-height: 1.5;
+      color: var(--soft);
+      line-height: 1.45;
+      max-width: 52vw;
+      margin: 0 auto;
     }
 
-    .hidden {
-      display: none !important;
-    }
+    .hidden { display: none !important; }
 
-    /* ── Audio Playback Overlay ──────────────────────────────────── */
+    /* ── Connection screen (a phone is connected and nothing is playing) ── */
+    #connected-bg-img {
+      position: fixed;
+      inset: 0;
+      z-index: 4;
+      overflow: hidden;
+      background:
+        radial-gradient(60vw 60vw at 8% -10%, rgba(0, 122, 255, 0.22), transparent 60%),
+        radial-gradient(70vw 70vw at 95% 110%, rgba(70, 150, 255, 0.28), transparent 60%),
+        linear-gradient(180deg, #f7f9ff 0%, #e8eefa 100%);
+    }
+    #connected-bg-img .rings span {
+      position: absolute;
+      left: 50%; top: 42%;
+      border-radius: 50%;
+      border: 1px solid rgba(0, 122, 255, 0.14);
+      transform: translate(-50%, -50%);
+      animation: ripple 6s infinite ease-out;
+    }
+    #connected-bg-img .rings span:nth-child(1) { width: 26vw; height: 26vw; }
+    #connected-bg-img .rings span:nth-child(2) { width: 38vw; height: 38vw; animation-delay: 1.5s; }
+    #connected-bg-img .rings span:nth-child(3) { width: 52vw; height: 52vw; animation-delay: 3s; }
+    #connected-bg-img .rings span:nth-child(4) { width: 68vw; height: 68vw; animation-delay: 4.5s; }
+    @keyframes ripple {
+      0%   { opacity: 0.25; }
+      40%  { opacity: 1; }
+      100% { opacity: 0.25; }
+    }
+    .connected-pill {
+      position: absolute;
+      top: 6vh; right: 6.2vw;
+      display: flex; align-items: center; gap: 0.8vw;
+      padding: 0 1.7vw;
+      height: 5.4vh;
+      min-height: 34px;
+      border-radius: 999px;
+      background: var(--card);
+      border: 1px solid var(--line);
+      box-shadow: 0 0.6vw 2vw rgba(10, 60, 140, 0.10);
+      font-size: clamp(14px, 1.45vw, 46px);
+      font-weight: 600;
+    }
+    .connected-pill i {
+      width: 0.85vw; height: 0.85vw;
+      min-width: 9px; min-height: 9px;
+      border-radius: 50%;
+      background: #22c55e;
+      box-shadow: 0 0 0.8vw rgba(34, 197, 94, 0.8);
+      animation: blink 2s infinite ease-in-out;
+    }
+    @keyframes blink { 50% { opacity: 0.45; } }
+
+    .connected-center {
+      position: absolute;
+      left: 0; right: 0; top: 17vh;
+      display: flex; flex-direction: column; align-items: center;
+      text-align: center;
+    }
+    .connected-icon {
+      width: 11.5vw; height: 11.5vw;
+      border-radius: 30%;
+      background: linear-gradient(150deg, #2b92ff, #0a62d6);
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 2vw 5vw rgba(0, 100, 230, 0.35);
+    }
+    .connected-icon svg { width: 55%; height: 55%; }
+    .connected-title {
+      margin-top: 4.5vh;
+      font-size: clamp(34px, 5.6vw, 180px);
+      font-weight: 700;
+      letter-spacing: -0.035em;
+      color: var(--ink);
+    }
+    .connected-sub {
+      margin-top: 1.6vh;
+      max-width: 60vw;
+      font-size: clamp(15px, 1.95vw, 60px);
+      color: var(--soft);
+    }
+    .features {
+      position: absolute;
+      left: 0; right: 0; bottom: 15vh;
+      display: flex; justify-content: center; gap: 1.5vw;
+    }
+    .feature {
+      display: flex; align-items: center; gap: 0.95vw;
+      padding: 0 1.8vw 0 0.85vw;
+      height: 9.3vh;
+      min-height: 56px;
+      border-radius: 1.6vw;
+      background: var(--card);
+      border: 1px solid var(--line);
+      box-shadow: 0 0.8vw 2.4vw rgba(10, 60, 140, 0.08);
+      font-size: clamp(14px, 1.45vw, 46px);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .feature b {
+      width: 3.5vw; height: 3.5vw;
+      min-width: 36px; min-height: 36px;
+      border-radius: 1vw;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .feature svg { width: 52%; height: 52%; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+    /* ── Audio playback ── */
     #audio-overlay {
       position: fixed;
       inset: 0;
-      background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+      background:
+        radial-gradient(55vw 55vw at 10% 0%, rgba(0, 122, 255, 0.22), transparent 60%),
+        radial-gradient(65vw 65vw at 95% 105%, rgba(70, 150, 255, 0.28), transparent 60%),
+        linear-gradient(180deg, #f7f9ff 0%, #e8eefa 100%);
       display: none;
       flex-direction: column;
       justify-content: center;
       align-items: center;
       z-index: 8;
-      color: white;
+      color: var(--ink);
     }
-
     .audio-disc-container {
       position: relative;
-      width: 280px;
-      height: 280px;
-      margin-bottom: 50px;
+      width: 24vw; height: 24vw;
+      min-width: 220px; min-height: 220px;
+      margin-bottom: 6vh;
     }
-
-    /* Outer glow ring */
     .audio-disc-glow {
       position: absolute;
-      top: -20px;
-      left: -20px;
-      width: 320px;
-      height: 320px;
+      inset: -12%;
       border-radius: 50%;
-      background: radial-gradient(circle, rgba(102, 126, 234, 0.3) 0%, transparent 70%);
+      background: radial-gradient(circle, rgba(0, 122, 255, 0.30) 0%, transparent 68%);
       animation: glow-pulse 3s ease-in-out infinite;
     }
-
     @keyframes glow-pulse {
       0%, 100% { transform: scale(1); opacity: 0.6; }
-      50% { transform: scale(1.15); opacity: 1; }
+      50%      { transform: scale(1.1); opacity: 1; }
     }
-
-    /* Vinyl disc */
     .audio-disc {
       position: relative;
-      width: 280px;
-      height: 280px;
+      width: 100%; height: 100%;
       border-radius: 50%;
-      background: 
-        radial-gradient(circle at center, #1a1a2e 15%, transparent 16%),
-        radial-gradient(circle at center, transparent 30%, rgba(255,255,255,0.03) 31%, transparent 32%),
-        radial-gradient(circle at center, transparent 45%, rgba(255,255,255,0.03) 46%, transparent 47%),
-        radial-gradient(circle at center, transparent 60%, rgba(255,255,255,0.03) 61%, transparent 62%),
-        radial-gradient(circle at center, transparent 75%, rgba(255,255,255,0.03) 76%, transparent 77%),
-        linear-gradient(135deg, #2d2d44 0%, #1a1a2e 100%);
-      box-shadow: 0 0 60px rgba(102, 126, 234, 0.2),
-                  inset 0 0 30px rgba(0, 0, 0, 0.5);
+      background:
+        radial-gradient(circle at center, #e9eefa 15%, transparent 16%),
+        repeating-radial-gradient(circle at center, rgba(14, 21, 34, 0.05) 0 1px, transparent 1px 7px),
+        conic-gradient(from 210deg, #1a2438, #0d1424 25%, #263350 50%, #0d1424 75%, #1a2438);
+      box-shadow: 0 2vw 6vw rgba(10, 40, 100, 0.35), inset 0 0 3vw rgba(0, 0, 0, 0.5);
       animation: spin-disc 8s linear infinite;
     }
-
-    .audio-disc.paused {
-      animation-play-state: paused;
-    }
-
-    @keyframes spin-disc {
-      from { transform: rotate(0deg); }
-      to { transform: rotate(360deg); }
-    }
-
-    /* Center label on disc */
+    .audio-disc.paused { animation-play-state: paused; }
+    @keyframes spin-disc { to { transform: rotate(360deg); } }
     .audio-disc-center {
       position: absolute;
-      top: 50%;
-      left: 50%;
+      top: 50%; left: 50%;
       transform: translate(-50%, -50%);
-      width: 90px;
-      height: 90px;
+      width: 32%; height: 32%;
       border-radius: 50%;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      box-shadow: 0 4px 20px rgba(102, 126, 234, 0.4);
+      background: linear-gradient(145deg, #4aa3ff 0%, #007aff 100%);
+      display: flex; justify-content: center; align-items: center;
+      box-shadow: 0 0.6vw 2vw rgba(0, 122, 255, 0.5);
     }
+    .audio-disc-center svg { width: 46%; height: 46%; fill: #fff; }
 
-    .audio-disc-center svg {
-      width: 40px;
-      height: 40px;
-      fill: white;
-    }
-
-    /* Track info */
-    .audio-track-info {
-      text-align: center;
-      margin-bottom: 40px;
-    }
-
+    .audio-track-info { text-align: center; margin-bottom: 5vh; }
     .audio-now-playing {
-      font-size: 18px;
-      text-transform: uppercase;
-      letter-spacing: 4px;
-      color: rgba(255, 255, 255, 0.5);
-      margin-bottom: 12px;
-    }
-
-    .audio-track-title {
-      font-size: 28px;
+      font-size: clamp(12px, 1.25vw, 40px);
       font-weight: 600;
-      color: white;
-      max-width: 600px;
+      text-transform: uppercase;
+      letter-spacing: 0.32em;
+      color: var(--blue);
+      margin-bottom: 1.6vh;
+    }
+    .audio-track-title {
+      font-size: clamp(24px, 3.1vw, 100px);
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--ink);
+      max-width: 70vw;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-
-    /* Equalizer bars */
     .audio-equalizer {
       display: flex;
       align-items: flex-end;
-      gap: 6px;
-      height: 50px;
+      gap: 0.55vw;
+      height: 6vh;
     }
-
     .eq-bar {
-      width: 8px;
-      background: linear-gradient(to top, #667eea, #764ba2);
-      border-radius: 4px;
+      width: 0.6vw;
+      min-width: 6px;
+      background: linear-gradient(to top, #0a62d6, #4aa3ff);
+      border-radius: 99px;
       animation: eq-bounce 1.2s ease-in-out infinite;
     }
-
-    .eq-bar.paused {
-      animation-play-state: paused;
-      height: 8px !important;
-    }
-
+    .eq-bar.paused { animation-play-state: paused; height: 8px !important; }
     .eq-bar:nth-child(1) { animation-delay: 0s; }
     .eq-bar:nth-child(2) { animation-delay: 0.15s; }
     .eq-bar:nth-child(3) { animation-delay: 0.3s; }
@@ -334,27 +452,42 @@
     .eq-bar:nth-child(7) { animation-delay: 0.9s; }
     .eq-bar:nth-child(8) { animation-delay: 0.2s; }
     .eq-bar:nth-child(9) { animation-delay: 0.5s; }
-
     @keyframes eq-bounce {
-      0%, 100% { height: 8px; }
-      25% { height: 35px; }
-      50% { height: 18px; }
-      75% { height: 45px; }
+      0%, 100% { height: 14%; }
+      25%      { height: 70%; }
+      50%      { height: 36%; }
+      75%      { height: 90%; }
+    }
+
+    /* ── YouTube (IFrame Player API), above every other layer ── */
+    #yt-stage {
+      position: fixed;
+      inset: 0;
+      z-index: 11;
+      background: #000;
+      display: none;
+    }
+    #yt-stage iframe {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: 0;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: 0.001s !important; animation-iteration-count: 1 !important; }
     }
   </style>
 </head>
 <body>
 
-  <!-- Ambient Glowing Blobs -->
+  <!-- Ambient backdrop -->
   <div class="ambient-bg">
     <div class="glow-blob blob1"></div>
     <div class="glow-blob blob2"></div>
   </div>
 
-  <!-- Mirror video stays PERMANENTLY muted (autoplay-safe). Mirroring sound
-       plays through the dedicated #audio-sink element below, fed by the
-       WebRTC audio track — the two stay in sync because they share one
-       peer connection (RTCP lip-sync). -->
   <video id="video" autoplay playsinline muted></video>
   <audio id="audio-sink" autoplay></audio>
 
@@ -364,8 +497,31 @@
   <!-- Image container for photo casting -->
   <img id="image-player" style="position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; z-index: 9; display: none;" />
 
-  <!-- Full-screen connected background image -->
-  <img id="connected-bg-img" src="TV-Connected2.svg" style="position: fixed; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 4; display: none;" />
+  <!-- Connection screen: shown while a phone is connected and nothing is playing -->
+  <div id="connected-bg-img" style="display: none;" aria-hidden="true">
+    <div class="rings"><span></span><span></span><span></span><span></span></div>
+    <div class="brand">
+      <span class="brand-mark">
+        <svg viewBox="0 0 24 24" class="cast-icon"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/><path d="M7 13a3 3 0 0 1 3 3M7 10a6 6 0 0 1 6 6"/></svg>
+      </span>
+      WebCast
+    </div>
+    <div class="connected-pill"><i></i>Connected</div>
+    <div class="connected-center">
+      <div class="connected-icon">
+        <svg viewBox="0 0 24 24" class="cast-icon"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/><path d="M7 13a3 3 0 0 1 3 3M7 10a6 6 0 0 1 6 6"/></svg>
+      </div>
+      <div class="connected-title">You’re connected</div>
+      <div class="connected-sub">Paste a link or pick a photo or video on your iPhone to see it here</div>
+    </div>
+    <div class="features">
+      <div class="feature"><b style="background: rgba(0, 122, 255, 0.12)"><svg viewBox="0 0 24 24" stroke="#007aff"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.6 3.9 5.6 3.9 9S14.600 18.400 12 21M12 3C9.400 5.600 8.100 8.600 8.100 12S9.400 18.400 12 21"/></svg></b>Web videos</div>
+      <div class="feature"><b style="background: rgba(255, 59, 48, 0.12)"><svg viewBox="0 0 24 24" stroke="#ff3b30"><rect x="2.500" y="5.500" width="19" height="13" rx="3.500"/><path d="M10 9.500l5 2.500-5 2.500z"/></svg></b>YouTube</div>
+      <div class="feature"><b style="background: rgba(52, 199, 89, 0.14)"><svg viewBox="0 0 24 24" stroke="#22a44a"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.600"/><path d="M21 16l-5-5-8 8"/></svg></b>Photos &amp; videos</div>
+      <div class="feature"><b style="background: rgba(255, 149, 0, 0.14)"><svg viewBox="0 0 24 24" stroke="#e08600"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></svg></b>Music</div>
+    </div>
+    <div class="hint">Your TV stays ready — just pick something on your phone</div>
+  </div>
 
   <!-- Custom Media Player for video/audio casting -->
   <video id="media-player" class="hidden" playsinline preload="auto"
@@ -388,35 +544,38 @@
       <div class="audio-track-title" id="audioTrackTitle">Music</div>
     </div>
     <div class="audio-equalizer" id="audioEqualizer">
-      <div class="eq-bar"></div>
-      <div class="eq-bar"></div>
-      <div class="eq-bar"></div>
-      <div class="eq-bar"></div>
-      <div class="eq-bar"></div>
-      <div class="eq-bar"></div>
-      <div class="eq-bar"></div>
-      <div class="eq-bar"></div>
-      <div class="eq-bar"></div>
+      <div class="eq-bar"></div><div class="eq-bar"></div><div class="eq-bar"></div>
+      <div class="eq-bar"></div><div class="eq-bar"></div><div class="eq-bar"></div>
+      <div class="eq-bar"></div><div class="eq-bar"></div><div class="eq-bar"></div>
     </div>
   </div>
 
+  <!-- YouTube videos play here, in YouTube's own embedded player -->
+  <div id="yt-stage"><div id="yt-player"></div></div>
 
-
+  <!-- Status overlay: ready / connecting / ended -->
   <div id="overlay">
+    <div class="brand">
+      <span class="brand-mark">
+        <svg viewBox="0 0 24 24" class="cast-icon"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/><path d="M7 13a3 3 0 0 1 3 3M7 10a6 6 0 0 1 6 6"/></svg>
+      </span>
+      WebCast
+    </div>
     <div class="glass-card">
       <div class="logo-ring" id="logo-ring">
-        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.5"
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.5"
              stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2" y="3" width="20" height="14" rx="2"/>
-          <path d="M8 21h8M12 17v4"/>
-          <path d="M2 10h20"/>
+          <rect x="3" y="4" width="18" height="12" rx="2"/>
+          <path d="M8 20h8M12 16v4"/>
+          <path d="M7 13a3 3 0 0 1 3 3M7 10a6 6 0 0 1 6 6"/>
         </svg>
       </div>
       <div>
         <div id="status-title">Ready to Connect</div>
-        <div id="status-sub">Open the app on your iPhone and tap “Tap to connect” to get started</div>
+        <div id="status-sub">Open WebCast on your iPhone and choose this TV to get started</div>
       </div>
     </div>
+    <div class="hint">Your phone and TV need to be on the same Wi-Fi</div>
   </div>
 
   <!-- Google Cast Web Receiver SDK (CAF v3) -->
@@ -488,7 +647,7 @@
 
         context.sendCustomMessage(NS, senderId, {
           type: 'AUDIO_STATE',
-          rv: 7, // receiver revision — lets the phone verify the deployed version
+          rv: 10, // receiver revision — lets the phone verify the deployed version
           audioTracks: audioTracks,
           muted: audioSink.muted,
           volume: audioSink.volume,
@@ -541,7 +700,8 @@
       const playerState = playerManager ? playerManager.getPlayerState() : null;
       const isMediaActive = (playerState === 'PLAYING' || playerState === 'PAUSED' || playerState === 'BUFFERING') 
         || mediaLoadInProgress 
-        || isImageActive;
+        || isImageActive
+        || isYouTubeActive;
 
       const isMirroringActive = !!(video.srcObject && video.classList.contains('visible'));
       const isAudioActive = audioOverlay && audioOverlay.style.display === 'flex';
@@ -593,13 +753,17 @@
     // silently reconnects after transient drops (backgrounding, Wi-Fi blips)
     // and a reconnect cancels the shutdown. Only after the grace period does
     // the TV return to its home screen.
-    function scheduleShutdown() {
+    function scheduleShutdown(immediate = false) {
       cancelShutdown();
       setRingState('ended');
-      setStatus('Waiting for your iPhone…', 'Reconnecting automatically — or start mirroring again from the app');
+      if (immediate) {
+        try { context.stop(); } catch (e) { console.warn('[Receiver] stop failed:', e); }
+        return;
+      }
+      setStatus('Session ended', 'Closing connection…');
       shutdownTimer = setTimeout(() => {
         try { context.stop(); } catch (e) { console.warn('[Receiver] stop failed:', e); }
-      }, 60000);
+      }, 3000);
     }
 
     function cancelShutdown() {
@@ -610,7 +774,7 @@
     // gone — never while media might still resume.
     function maybeShutdownIfAbandoned() {
       const remaining = context.getSenders ? context.getSenders().length : 0;
-      if (remaining === 0 && !senderConnected) scheduleShutdown();
+      if (remaining === 0 && !senderConnected) scheduleShutdown(true);
     }
 
     // ── Cast Receiver setup ───────────────────────────────────────────────
@@ -620,6 +784,11 @@
     // State flags to determine if standard media or custom image is active
     let mediaLoadInProgress = false;
     let isImageActive = false;
+    let isYouTubeActive = false;
+    let ytPlayer = null;
+    let ytApiPromise = null;
+    let ytStatusTimer = null;
+    const ytStage = document.getElementById('yt-stage');
 
     function updateUIForMediaState() {
       try {
@@ -684,31 +853,11 @@
       }
     }
 
+    // ── Standard media (CAF LOAD) ─────────────────────────────────────────
+    // The LOAD interceptor is installed first and on its own, so nothing
+    // below can stop it being set. Web videos arrive through it: it clears
+    // whatever else is on screen and brings CAF's player to the front.
     try {
-      playerManager.addEventListener(
-        cast.framework.events.EventType.PLAYER_STATE_CHANGED,
-        (event) => {
-          console.log('[Receiver] PLAYER_STATE_CHANGED:', event.state);
-          // Clear load flag once the player enters a real playback state
-          if (event.state === 'PLAYING' || event.state === 'PAUSED') {
-            mediaLoadInProgress = false;
-          }
-          updateUIForMediaState();
-        }
-      );
-      playerManager.addEventListener(
-        cast.framework.events.EventType.MEDIA_STATUS,
-        () => updateUIForMediaState()
-      );
-      // Listen for media finished to restore idle UI
-      playerManager.addEventListener(
-        cast.framework.events.EventType.MEDIA_FINISHED,
-        () => {
-          console.log('[Receiver] MEDIA_FINISHED');
-          mediaLoadInProgress = false;
-          updateUIForMediaState();
-        }
-      );
       playerManager.setMessageInterceptor(
         cast.framework.messages.MessageType.LOAD,
         (loadRequestData) => {
@@ -716,12 +865,16 @@
                       loadRequestData && loadRequestData.media
                         ? (loadRequestData.media.contentId || loadRequestData.media.contentUrl)
                         : 'unknown');
-          // Set load flag IMMEDIATELY so updateUI shows the player
           mediaLoadInProgress = true;
           isImageActive = false;
           cancelShutdown();
+          stopYouTube();
 
-          // Clean up any WebRTC mirroring session.
+          if (mediaPlayer.src) {
+            stopMediaCasting();
+            hideAudioOverlay();
+          }
+
           stopAudioStateReporting();
           if (pc) { pc.close(); pc = null; }
           remoteDescSet = false;
@@ -730,22 +883,41 @@
           audioSink.srcObject = null;
           audioSink.pause();
 
-          // Hide overlay & mirroring elements immediately so the standard player is exposed.
-          const imgPlayer = document.getElementById('image-player');
-          if (imgPlayer) imgPlayer.style.display = 'none';
-          video.classList.remove('visible');
-          video.style.display = 'none';
-          overlay.style.display = 'none';
-          const ambient = document.querySelector('.ambient-bg');
-          if (ambient) ambient.style.display = 'none';
-          applyUIVisibility();
-
+          updateUIForMediaState();
           return loadRequestData;
         }
       );
     } catch (e) {
-      console.warn('[Receiver] player listener setup failed:', e);
+      console.warn('[Receiver] LOAD interceptor setup failed:', e);
     }
+
+    // Keeps the screen in step with CAF's player. Each event is registered
+    // only when this CAF version defines it, and separately, so one missing
+    // type can never take the others down.
+    function onPlayerEvent(name, handler) {
+      const type = cast.framework.events.EventType[name];
+      if (!type) {
+        console.warn('[Receiver] CAF event type not available:', name);
+        return;
+      }
+      try {
+        playerManager.addEventListener(type, handler);
+      } catch (e) {
+        console.warn('[Receiver] could not listen for ' + name + ':', e);
+      }
+    }
+
+    ['PLAYING', 'PAUSE'].forEach((name) => onPlayerEvent(name, () => {
+      mediaLoadInProgress = false;
+      updateUIForMediaState();
+    }));
+    ['PLAYER_LOAD_COMPLETE', 'BUFFERING', 'MEDIA_STATUS'].forEach((name) =>
+      onPlayerEvent(name, () => updateUIForMediaState()));
+    ['MEDIA_FINISHED', 'ERROR'].forEach((name) => onPlayerEvent(name, (event) => {
+      console.log('[Receiver] ' + name, event && (event.detailedErrorCode || event.endedReason || ''));
+      mediaLoadInProgress = false;
+      updateUIForMediaState();
+    }));
 
     // ── Custom channel (WebRTC signaling) ─────────────────────────────────
     context.addCustomMessageListener(NS, async (event) => {
@@ -764,16 +936,31 @@
         case 'ice':   await handleICE(msg);       break;
         case 'image': handleImage(msg.url);       break;
         case 'stop':
-          cleanup('Connected', 'Ready when you are — start mirroring or cast media from your iPhone');
+          cleanup('Connected', 'Ready when you are');
           setRingState('connected');
           break;
+        case 'YOUTUBE_LOAD':
+          playYouTube(msg.videoId, msg.startSeconds);
+          break;
+        case 'YOUTUBE_CONTROL':
+          controlYouTube(msg.command, msg.value);
+          break;
+        case 'CONNECT':
+          cancelShutdown();
+          senderConnected = true;
+          setRingState('connected');
+          setStatus('Connected', 'Ready when you are');
+          applyUIVisibility();
+          break;
         case 'CAST_VIDEO':
+          stopYouTube();
           cleanup(null, null, true);
           isAudioMode = false;
           playMedia(msg.videoUrl, msg.autoplay !== false);
           setStatus('Video Loading...');
           break;
         case 'CAST_AUDIO':
+          stopYouTube();
           cleanup(null, null, true);
           isAudioMode = true;
           playMedia(msg.audioUrl, msg.autoplay !== false);
@@ -814,7 +1001,7 @@
         // Just update the ring state and status text. If a media load arrives
         // right after connection, the LOAD interceptor handles the UI switch.
         setRingState('connected');
-        setStatus('Connected', 'Ready when you are — start mirroring or cast media from your iPhone');
+        setStatus('Connected', 'Ready when you are');
       }
     );
 
@@ -840,7 +1027,7 @@
         }
 
         cleanup(null, null);
-        scheduleShutdown();
+        scheduleShutdown(true);
       }
     );
 
@@ -855,10 +1042,24 @@
       maxInactivity: 600
     });
 
+    // A sender already present right after start (the phone reconnected, or
+    // the receiver was hot-started) gets the connection screen immediately.
+    setTimeout(() => {
+      const senders = context.getSenders ? context.getSenders() : [];
+      if (senders.length > 0 && !senderConnected) {
+        cancelShutdown();
+        senderConnected = true;
+        setRingState('connected');
+        setStatus('Connected', 'Ready when you are');
+        applyUIVisibility();
+      }
+    }, 300);
+
     // ── Image handling ──────────────────────────────────────────────────────
     function handleImage(imageUrl) {
       console.log('[Receiver] Displaying image:', imageUrl);
       cancelShutdown();
+      stopYouTube();
       isImageActive = true;
 
       // Clean up any WebRTC session
@@ -996,6 +1197,7 @@
       remoteDescSet     = false;
       pendingCandidates = [];
       cancelShutdown();
+      stopYouTube();
       cleanup(null, null, true);
       setStatus('Connecting…', 'Setting up the mirror stream');
       setRingState('connected');
@@ -1248,9 +1450,183 @@
       setTimeout(() => { mediaStopping = false; }, 100);
     }
 
-    function returnToSplash() {
+    // ── YouTube (IFrame Player API) ────────────────────────────────────────
+    // The phone sends only a video ID; YouTube's own embedded player streams
+    // it. One player exists per video and is destroyed when anything else plays.
+    function loadYouTubeApi() {
+      if (window.YT && window.YT.Player) return Promise.resolve();
+      if (ytApiPromise) return ytApiPromise;
+      ytApiPromise = new Promise((resolve, reject) => {
+        const previous = window.onYouTubeIframeAPIReady;
+        window.onYouTubeIframeAPIReady = () => {
+          if (typeof previous === 'function') { try { previous(); } catch (e) {} }
+          resolve();
+        };
+        const tag = document.createElement('script');
+        tag.src = 'https://www.youtube.com/iframe_api';
+        tag.onerror = () => { ytApiPromise = null; reject(new Error('YouTube API failed to load')); };
+        document.head.appendChild(tag);
+      });
+      return ytApiPromise;
+    }
+
+    function sendYouTubeState(state, extra) {
+      if (!senderId) return;
+      let currentTime = 0, duration = 0;
+      try {
+        if (ytPlayer && ytPlayer.getCurrentTime) {
+          currentTime = ytPlayer.getCurrentTime() || 0;
+          duration = ytPlayer.getDuration() || 0;
+        }
+      } catch (e) {}
+      try {
+        context.sendCustomMessage(NS, senderId, Object.assign({
+          type: 'YOUTUBE_STATE', state: state, currentTime: currentTime, duration: duration
+        }, extra || {}));
+      } catch (e) {
+        console.warn('[Receiver] YouTube state not sent:', e);
+      }
+    }
+
+    function youTubeStateName(code) {
+      switch (code) {
+        case 0: return 'ended';
+        case 1: return 'playing';
+        case 2: return 'paused';
+        case 3: return 'buffering';
+        default: return 'loading';
+      }
+    }
+
+    async function playYouTube(videoId, startSeconds) {
+      if (!videoId) return;
+      console.log('[Receiver] YouTube video requested:', videoId);
+      cancelShutdown();
+      stopYouTube();
+
+      stopAudioStateReporting();
+      if (pc) { pc.close(); pc = null; }
+      remoteDescSet = false;
+      pendingCandidates = [];
+      video.srcObject = null;
+      audioSink.srcObject = null;
+      audioSink.pause();
+      try {
+        if (playerManager && playerManager.getPlayerState() !== 'IDLE') playerManager.stop();
+      } catch (e) {}
+      mediaLoadInProgress = false;
       stopMediaCasting();
       hideAudioOverlay();
+      isImageActive = false;
+      const imgPlayer = document.getElementById('image-player');
+      if (imgPlayer) { imgPlayer.style.display = 'none'; imgPlayer.src = ''; }
+
+      isYouTubeActive = true;
+      ytStage.style.display = 'block';
+      applyUIVisibility();
+      sendYouTubeState('loading');
+
+      try {
+        await loadYouTubeApi();
+      } catch (e) {
+        console.warn('[Receiver]', e);
+        failYouTube(-1);
+        return;
+      }
+      if (!isYouTubeActive) return;
+
+      ytPlayer = new YT.Player('yt-player', {
+        width: '100%',
+        height: '100%',
+        videoId: videoId,
+        playerVars: {
+          autoplay: 1,
+          playsinline: 1,
+          rel: 0,
+          start: Math.max(0, Math.floor(startSeconds || 0)),
+          origin: location.origin
+        },
+        events: {
+          onReady: (event) => {
+            try {
+              event.target.setVolume(Math.round(requestedVolume * 100));
+              event.target.playVideo();
+            } catch (e) {}
+          },
+          onStateChange: (event) => {
+            const state = youTubeStateName(event.data);
+            sendYouTubeState(state);
+            if (state === 'ended') stopYouTubeStatus();
+            else if (state === 'playing') startYouTubeStatus();
+          },
+          onError: (event) => {
+            console.warn('[Receiver] YouTube player error:', event.data);
+            failYouTube(event.data);
+          }
+        }
+      });
+    }
+
+    function controlYouTube(command, value) {
+      if (!ytPlayer) return;
+      try {
+        switch (command) {
+          case 'play':   ytPlayer.playVideo(); break;
+          case 'pause':  ytPlayer.pauseVideo(); break;
+          case 'seek':   ytPlayer.seekTo(parseFloat(value) || 0, true); break;
+          case 'volume': ytPlayer.setVolume(Math.round(Math.max(0, Math.min(1, parseFloat(value) || 0)) * 100)); break;
+          case 'stop':   returnToSplash(); break;
+        }
+      } catch (e) {
+        console.warn('[Receiver] YouTube control failed:', e);
+      }
+    }
+
+    function startYouTubeStatus() {
+      if (ytStatusTimer) return;
+      ytStatusTimer = setInterval(() => {
+        try {
+          if (ytPlayer && ytPlayer.getPlayerState) sendYouTubeState(youTubeStateName(ytPlayer.getPlayerState()));
+        } catch (e) {}
+      }, 1000);
+    }
+
+    function stopYouTubeStatus() {
+      if (ytStatusTimer) { clearInterval(ytStatusTimer); ytStatusTimer = null; }
+    }
+
+    function failYouTube(code) {
+      sendYouTubeState('error', { errorCode: code });
+      returnToSplash();
+    }
+
+    function stopYouTube() {
+      if (!isYouTubeActive && !ytPlayer) return;
+      const wasActive = isYouTubeActive;
+      isYouTubeActive = false;
+      stopYouTubeStatus();
+      if (ytPlayer) {
+        try { ytPlayer.destroy(); } catch (e) {}
+        ytPlayer = null;
+      }
+      ytStage.innerHTML = '<div id="yt-player"></div>';
+      ytStage.style.display = 'none';
+      if (wasActive) sendYouTubeState('stopped');
+      applyUIVisibility();
+    }
+
+    function returnToSplash() {
+      stopYouTube();
+      stopMediaCasting();
+      hideAudioOverlay();
+      mediaLoadInProgress = false;
+      try {
+        if (playerManager && playerManager.getPlayerState() !== 'IDLE') playerManager.stop();
+      } catch (e) {
+        console.warn('[Receiver] playerManager.stop() error:', e);
+      }
+      const castPlayer = document.querySelector('cast-media-player');
+      if (castPlayer) castPlayer.style.zIndex = '1';
       
       // Reset image casting status & elements
       isImageActive = false;
@@ -1268,10 +1644,10 @@
 
       if (senderConnected && context.getSenders().length > 0) {
         setRingState('connected');
-        setStatus('Connected', 'Ready when you are — start mirroring or cast media from your iPhone');
+        setStatus('Connected', 'Ready when you are');
       } else {
         setRingState('searching');
-        setStatus('Ready to Connect', 'Open the app on your iPhone and tap “Tap to connect” to get started');
+        setStatus('Ready to Connect', 'Open WebCast on your iPhone and choose this TV to get started');
       }
     }
 
@@ -1280,6 +1656,7 @@
       // connect events where keepOverlay=true) to prevent aborting in-flight
       // media load requests.
       if (!keepOverlay) {
+        stopYouTube();
         try {
           if (playerManager) playerManager.stop();
         } catch (e) {
